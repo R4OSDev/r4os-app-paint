@@ -199,8 +199,8 @@ const App = struct {
         var info: r4os.abi.GuiWindowInfo = .{};
         _ = self.ctx.desk.guiWindowInfo(&info);
         const canvas = r4os.gui.Canvas.init(&self.ctx.draw, info);
-        self.hosted_w = clampI32(canvas.w, 260, 1600);
-        self.hosted_h = clampI32(canvas.h, 220, 1000);
+        self.hosted_w = @max(canvas.w, 260);
+        self.hosted_h = @max(canvas.h, 220);
     }
 
     fn handleHostedKey(self: *App, raw_key: u8) void {
