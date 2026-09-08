@@ -25,7 +25,6 @@ const path_capacity: usize = 192;
 const status_capacity: usize = 96;
 const message_title_capacity: usize = 40;
 const message_text_capacity: usize = 128;
-const dir_buffer_capacity: usize = 4096;
 const max_dir_items: usize = 96;
 const dir_item_capacity: usize = 96;
 const scratch_capacity: usize = 512;
@@ -125,7 +124,7 @@ const App = struct {
     hosted_status: [status_capacity]u8 = .{0} ** status_capacity,
     message_title: [message_title_capacity]u8 = .{0} ** message_title_capacity,
     message_text: [message_text_capacity]u8 = .{0} ** message_text_capacity,
-    dirbuf: [dir_buffer_capacity]u8 = .{0} ** dir_buffer_capacity,
+    directory_page: r4os.directory_page.DialogPage(max_dir_items, path_capacity, dir_item_capacity) = .{},
     dir_items: [max_dir_items][dir_item_capacity]u8 = .{.{0} ** dir_item_capacity} ** max_dir_items,
     dir_item_slices: [max_dir_items][]const u8 = [_][]const u8{""} ** max_dir_items,
     dir_item_count: usize = 0,
@@ -490,38 +489,37 @@ const App = struct {
     }
 
     fn loadDirectory(self: *App) bool {
-        zero(self.dirbuf[0..]);
-        self.dir_item_count = 0;
-        const read = self.ctx.sys.dirList(zptr(self.current_dir[0..]), self.dirbuf[0 .. self.dirbuf.len - 1]);
-        if (read < 0) return false;
-        const len: usize = @intCast(read);
-        if (len < self.dirbuf.len) self.dirbuf[len] = 0;
-        self.parseDirectoryItems(self.dirbuf[0..@min(len, self.dirbuf.len - 1)]);
+        return self.loadDirectoryPage(0);
+    }
+
+    fn loadDirectoryPage(self: *App, number: u32) bool {
+        const path = r4os.app_storage.PathZ{ .ptr = zptr(self.current_dir[0..]), .len = @intCast(spanZ(self.current_dir[0..]).len) };
+        if (!self.directory_page.load(.{ .sys = self.ctx.sys }, path, number, "")) {
+            if (self.directory_page.count != 0) setZ(self.current_dir[0..], spanZ(self.directory_page.directory[0..]));
+            return false;
+        }
+        self.dir_item_count = self.directory_page.count;
+        for (self.directory_page.rows[0..self.dir_item_count], 0..) |row, index| {
+            self.dir_items[index] = row.label;
+            self.dir_item_slices[index] = spanZ(self.dir_items[index][0..]);
+        }
         return true;
     }
 
-    fn parseDirectoryItems(self: *App, data: []const u8) void {
-        var start: usize = 0;
-        var i: usize = 0;
-        while (i <= data.len) : (i += 1) {
-            if (i == data.len or data[i] == '\n') {
-                var end = i;
-                while (end > start and (data[end - 1] == '\r' or data[end - 1] == '\n')) end -= 1;
-                if (end > start) self.addDirItem(data[start..end]);
-                start = i + 1;
-            }
-        }
-    }
-
-    fn addDirItem(self: *App, text: []const u8) void {
-        if (self.dir_item_count >= max_dir_items) return;
-        const index = self.dir_item_count;
-        zero(self.dir_items[index][0..]);
-        const len = @min(text.len, dir_item_capacity - 1);
-        if (len > 0) @memcpy(self.dir_items[index][0..len], text[0..len]);
-        self.dir_items[index][len] = 0;
-        self.dir_item_slices[index] = self.dir_items[index][0..len];
-        self.dir_item_count += 1;
+    fn navigateDirectoryPage(self: *App, index: usize) bool {
+        if (index >= self.directory_page.count) return false;
+        const number = switch (self.directory_page.rows[index].kind) {
+            .previous => self.directory_page.number -| 1,
+            .next => self.directory_page.number + 1,
+            else => return false,
+        };
+        if (self.loadDirectoryPage(number)) {
+            self.dialog_selected_index = 0;
+            self.dialog_first_index = 0;
+            self.dialog_hover_index = null;
+            self.setStatus("Opened directory page");
+        } else self.setStatus("Directory read failed; previous view retained");
+        return true;
     }
 
     fn handleDialogKey(self: *App, key: u8) void {
@@ -704,6 +702,7 @@ const App = struct {
     }
 
     fn selectDirEntry(self: *App, index: usize) void {
+        if (self.navigateDirectoryPage(index)) return;
         const kind = self.resolveDirEntry(index);
         if (kind < 0) {
             self.setStatus("Selection failed");
@@ -725,14 +724,18 @@ const App = struct {
     }
 
     fn resolveDirEntry(self: *App, index: usize) i32 {
-        if (index >= self.dir_item_count) return -1;
-        zero(self.selected_path[0..]);
-        const kind = self.ctx.sys.dirEntry(zptr(self.current_dir[0..]), @intCast(index), self.selected_path[0 .. self.selected_path.len - 1]);
-        self.selected_path[self.selected_path.len - 1] = 0;
-        return kind;
+        if (index >= self.directory_page.count) return -1;
+        const row = &self.directory_page.rows[index];
+        setZ(self.selected_path[0..], spanZ(row.path[0..]));
+        return switch (row.kind) {
+            .file => 0,
+            .directory => 1,
+            else => -1,
+        };
     }
 
     fn fileDialogOk(self: *App) void {
+        if (self.navigateDirectoryPage(self.dialog_selected_index)) return;
         if (self.dialog == .save_as) {
             self.saveFromDialog();
             return;
