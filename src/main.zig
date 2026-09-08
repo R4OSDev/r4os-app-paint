@@ -94,6 +94,7 @@ const AppMenus = struct {
 };
 
 const App = struct {
+    saver: r4os.document_save.Saver = .{},
     ctx: *AppApi = undefined,
     menubar_state: r4os.gui.MenubarState = .{},
     menu_storage: AppMenus = .{},
@@ -446,6 +447,10 @@ const App = struct {
     }
 
     fn saveToPath(self: *App, path_buffer: []const u8) bool {
+        if (spanZ(path_buffer).len == 0 or spanZ(path_buffer).len >= path_capacity) {
+            self.showMessage("Save failed", "Path invalid or too long.", .warning);
+            return false;
+        }
         var path_copy: [path_capacity]u8 = .{0} ** path_capacity;
         copyZ(path_copy[0..], path_buffer);
         const image = self.imageView();
@@ -453,16 +458,16 @@ const App = struct {
             self.showMessage("Save failed", bmpWriterErrorText(err), .warning);
             return false;
         };
-        const written = self.ctx.sys.fileWrite(zptr(path_copy[0..]), self.file_buffer[0..encoded_len]);
-        if (written < 0 or @as(usize, @intCast(written)) != encoded_len) {
-            self.showMessage("Save failed", "Could not write BMP file.", .warning);
+        const saved = self.saver.save(.{ .sys = self.ctx.sys }, .{ .ptr = zptr(path_copy[0..]), .len = @intCast(spanZ(path_copy[0..]).len) }, self.file_buffer[0..encoded_len], false);
+        if (!saved.committed()) {
+            self.showMessage("Save failed", saved.message(), .warning);
             return false;
         }
         copyZ(self.current_path[0..], path_copy[0..]);
         self.setDirFromPath(spanZ(self.current_path[0..]));
         setZ(self.save_file_name[0..], baseName(spanZ(self.current_path[0..])));
         self.dirty = false;
-        self.setStatus("Saved BMP");
+        self.setStatus(if (saved == .saved) "Saved BMP" else saved.message());
         self.noteRecentDocument();
         return true;
     }

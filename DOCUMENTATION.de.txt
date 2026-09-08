@@ -23,3 +23,23 @@ Contract:
 - R4L-Imports: `R4SYS`, `R4DESK`, `R4DRAW`, `R4NET`, `R4DEV`
 - Zielpfad im Image: `C:\R4OS\SOFTWARE\DESKTOP\PAINT.R4X`
 
+
+
+Atomarer Dokument-Save ab 0.78.69
+--------------------------------
+Notepad 0.1.11 und Paint 0.1.7 schreiben Dokumente zuerst vollstaendig in
+eine eigens angelegte gleichgeordnete DSxxxxxx.TMP-Datei und bestaetigen den
+Streamabschluss. Erst danach erfolgt Files.replaceAtomic ohne direkten
+Ueberschreibfallback. Pfad, Dirty und Recent-Historie wechseln nur bei
+bestaetigtem Ersatz. Bei gekuerztem Notepad-Inhalt muss das neue Ziel auch
+innerhalb der atomaren Operation noch fehlen.
+
+Vor dem Ersatz wird bei Fehlern ausschliesslich der eigene Stream
+abgebrochen. Ein unklarer Ersatz laesst Zwischenstand und Backup bestehen;
+das bearbeitete Dokument bleibt Dirty. Ein bestaetigter Save mit spaeterem
+Backup-Loeschfehler gilt weiter als gespeichert und meldet das behaltene
+Backup. Die vorhandene FAT-Fassade ersetzt bestehende lange Namen, kann
+aber keine neuen langen Namen atomar anlegen. Dieser Fall wird ohne
+Direktfallback abgewiesen; die vollstaendige Zwischenkopie bleibt erhalten.
+Ein kurzer Hostfall mit genau einem absichtlich unvollstaendigen Schreiben
+sowie ein SMP4-Gastfall fuer Save/Save As beider Apps pruefen den Vertrag.
