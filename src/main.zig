@@ -1,4 +1,5 @@
 const r4os = @import("r4os");
+const std = @import("std");
 const r4img = @import("r4img");
 const bmp_writer = @import("bmp_writer.zig");
 const AppApi = struct {
@@ -103,6 +104,12 @@ const App = struct {
     quit_requested: bool = false,
     dirty: bool = false,
     drawing: bool = false,
+    full_redraw: bool = true,
+    frame_valid: bool = false,
+    delta_frames: u32 = 0,
+    image_damage: ?r4os.gui.Rect = null,
+    status_damage: bool = false,
+    raster_patch: [r4os.raster.max_pixels]u32 = undefined,
     hosted_w: i32 = 520,
     hosted_h: i32 = 360,
     tool: Tool = .pencil,
@@ -151,6 +158,7 @@ const App = struct {
         _ = self.ctx.desk.guiSetMinSize(420, 300);
         self.updateHostedMetrics();
         self.renderHosted();
+        self.flushRender();
 
         var events = r4os.EventLoop.init(self.ctx.sys, self.ctx.desk, &.{});
         while (!self.quit_requested) {
@@ -158,6 +166,14 @@ const App = struct {
                 .message => |message| {
                     const event = message.guiEvent() orelse continue;
                     self.handleHostedEvent(event);
+                    // Preserve every ordered event and every line segment,
+                    // but publish at most one frame per bounded host batch.
+                    var count: usize = 1;
+                    while (count < 32 and !self.quit_requested) : (count += 1) {
+                        const pending = events.poll() orelse break;
+                        if (pending.guiEvent()) |next| self.handleHostedEvent(next);
+                    }
+                    if (!self.quit_requested) self.flushRender();
                 },
                 .failure => |raw| return raw,
                 .timed_out => {},
@@ -182,7 +198,7 @@ const App = struct {
         const kind: r4os.abi.GuiEventKind = @enumFromInt(event.kind);
         switch (kind) {
             .close => self.requestAction(.exit_app),
-            .resize => {
+            .resize, .font_changed => {
                 self.updateHostedMetrics();
                 self.renderHosted();
             },
@@ -259,10 +275,10 @@ const App = struct {
         }
 
         const canvas = self.appCanvas();
-        var menu_storage: AppMenus = undefined;
-        const menus = buildAppMenus(&menu_storage);
-        const menu_result = self.menubar_state.mouseDown(self.menubarRect(canvas), menus, x, y);
-        if (menu_result.action != .none or self.menubarRect(canvas).contains(x, y)) {
+        if (self.menubar_state.isOpen() or self.menubarRect(canvas).contains(x, y)) {
+            var menu_storage: AppMenus = undefined;
+            const menus = buildAppMenus(&menu_storage);
+            _ = self.menubar_state.mouseDown(self.menubarRect(canvas), menus, x, y);
             self.renderHosted();
             return;
         }
@@ -279,7 +295,6 @@ const App = struct {
             self.last_x = @intCast(point.x);
             self.last_y = @intCast(point.y);
             self.drawPoint(point);
-            self.renderHosted();
         }
     }
 
@@ -304,7 +319,6 @@ const App = struct {
             self.drawing = false;
             self.last_x = -1;
             self.last_y = -1;
-            self.renderHosted();
         }
     }
 
@@ -328,7 +342,6 @@ const App = struct {
             self.drawLine(self.last_x, self.last_y, px, py);
             self.last_x = px;
             self.last_y = py;
-            self.renderHosted();
         }
     }
 
@@ -891,20 +904,107 @@ const App = struct {
     }
 
     fn renderHosted(self: *App) void {
-        var paint = switch (r4os.app_gui.beginPaintForSize(&self.ctx.draw, self.hosted_w, self.hosted_h)) {
-            .paint => |value| value,
-            .failure => return,
-        };
+        self.full_redraw = true;
+    }
+
+    fn flushRender(self: *App) void {
+        if (!self.full_redraw and self.image_damage == null and !self.status_damage) return;
+        const canvas = self.appCanvas();
+        const image_rect = self.imageRect(canvas);
+        const scale = self.imageScale(canvas);
+        const pixel_damage = self.image_damage;
+        const screen_damage: ?r4os.gui.Rect = if (pixel_damage) |region| .{
+            .x = image_rect.x + region.x * @as(i32, @intCast(scale)),
+            .y = image_rect.y + region.y * @as(i32, @intCast(scale)),
+            .w = region.w * @as(i32, @intCast(scale)),
+            .h = region.h * @as(i32, @intCast(scale)),
+        } else null;
+        // Retained delta commands can also be replayed during a later full
+        // refresh. Never append a raster that could cover status/menu pixels.
+        const boundary = if (screen_damage) |region| !rectContains(self.workRect(canvas), region) else false;
+        const full = self.full_redraw or !self.frame_valid or boundary or
+            self.delta_frames + 1 >= r4os.abi.gui_frame_max_delta_chain;
+        var paint: r4os.PaintContext = undefined;
+        if (full) {
+            paint = switch (r4os.app_gui.beginPaintForSize(&self.ctx.draw, self.hosted_w, self.hosted_h)) {
+                .paint => |value| value,
+                .failure => {
+                    self.full_redraw = true;
+                    return;
+                },
+            };
+        } else {
+            var regions: [2]r4os.abi.DisplayDamageRect = undefined;
+            var count: usize = 0;
+            if (screen_damage) |region| {
+                regions[count] = damageRect(region);
+                count += 1;
+            }
+            if (self.status_damage) {
+                regions[count] = damageRect(self.statusRect(canvas));
+                count += 1;
+            }
+            if (self.ctx.draw.guiFrameBeginDamage(regions[0..count]) < 0) {
+                // Old tables or a lost base require a new complete frame.
+                self.full_redraw = true;
+                self.flushRender();
+                return;
+            }
+            paint = .{ .canvas = canvas, .transactional = true };
+        }
         defer paint.discard();
-        const canvas = paint.canvas;
-        var scratch: [scratch_capacity]u8 = .{0} ** scratch_capacity;
-        _ = canvas.clear(r4os.gui.default_palette.face);
-        self.renderToolbar(canvas, scratch[0..]);
-        self.renderWorkArea(canvas);
-        self.renderStatus(canvas, scratch[0..]);
-        _ = canvas.menubar(self.menubar(), scratch[0..]);
-        self.renderDialog(canvas, scratch[0..]);
-        _ = paint.present();
+        var commands: [128]r4os.abi.GuiFrameCommand = undefined;
+        var resources: [8192]u8 = undefined;
+        var builder: r4os.FrameCanvas = undefined;
+        const buffered = paint.bufferedCanvas(&builder, &commands, &resources);
+        var scratch: [scratch_capacity]u8 = undefined;
+        if (full) {
+            _ = buffered.clear(r4os.gui.default_palette.face);
+            self.renderToolbar(buffered, &scratch);
+            self.renderWorkArea(buffered);
+            self.renderStatus(buffered, &scratch);
+            _ = buffered.menubar(self.menubar(), &scratch);
+            self.renderDialog(buffered, &scratch);
+        } else {
+            if (pixel_damage) |region| {
+                const width: usize = @intCast(region.w);
+                const height: usize = @intCast(region.h);
+                for (0..height) |row| {
+                    const source = (@as(usize, @intCast(region.y)) + row) * self.image_w + @as(usize, @intCast(region.x));
+                    @memcpy(self.raster_patch[row * width ..][0..width], self.pixels[source..][0..width]);
+                }
+                const target = screen_damage.?;
+                _ = buffered.raster(target.x, target.y, @intCast(width), @intCast(height), scale, self.raster_patch[0 .. width * height]);
+            }
+            if (self.status_damage) self.renderStatus(buffered, &scratch);
+        }
+        if (paint.present() < 0) {
+            self.full_redraw = true;
+            return;
+        }
+        self.full_redraw = false;
+        self.frame_valid = true;
+        self.delta_frames = if (full) 0 else self.delta_frames + 1;
+        self.image_damage = null;
+        self.status_damage = false;
+    }
+
+    fn damageRect(rect: r4os.gui.Rect) r4os.abi.DisplayDamageRect {
+        return .{ .x = rect.x, .y = rect.y, .w = @intCast(rect.w), .h = @intCast(rect.h) };
+    }
+
+    fn rectContains(outer: r4os.gui.Rect, inner: r4os.gui.Rect) bool {
+        return inner.x >= outer.x and inner.y >= outer.y and inner.right() <= outer.right() and inner.bottom() <= outer.bottom();
+    }
+
+    fn damagePixel(self: *App, point: ImagePoint) void {
+        const x: i32 = @intCast(point.x);
+        const y: i32 = @intCast(point.y);
+        if (self.image_damage) |old| {
+            const left = @min(old.x, x);
+            const top = @min(old.y, y);
+            self.image_damage = .{ .x = left, .y = top, .w = @max(old.right(), x + 1) - left, .h = @max(old.bottom(), y + 1) - top };
+        } else self.image_damage = .{ .x = x, .y = y, .w = 1, .h = 1 };
     }
 
     fn renderToolbar(self: *App, canvas: r4os.gui.Canvas, scratch: []u8) void {
@@ -1162,8 +1262,13 @@ const App = struct {
 
     fn drawPoint(self: *App, point: ImagePoint) void {
         const color = if (self.tool == .pencil) pencil_color else background_color;
+        if (point.x >= self.image_w or point.y >= self.image_h) return;
+        const index = @as(usize, point.y) * self.image_w + point.x;
+        const changed = self.pixels[index] != color;
         const image = self.imageView();
         if (image.setPixel(point.x, point.y, color)) {
+            if (changed) self.damagePixel(point);
+            if (!self.dirty) self.status_damage = true;
             self.dirty = true;
             self.setStatus(if (self.tool == .pencil) "Drawing" else "Erasing");
         }
@@ -1209,6 +1314,7 @@ const App = struct {
     }
 
     fn setStatus(self: *App, message: []const u8) void {
+        if (!std.mem.eql(u8, spanZ(&self.hosted_status), message)) self.status_damage = true;
         setZ(self.hosted_status[0..], message);
     }
 

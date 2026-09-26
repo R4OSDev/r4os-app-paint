@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.5`
+- Version: `0.1.8`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/PAINT.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -66,3 +66,24 @@ Notepad methods on private FAT files and the real Paint methods on private
 NTFS files: Save and Save As over existing targets, exact saved bytes,
 metadata and sibling cleanup. It also confirms fresh Save As of a Notepad
 prefix through the create-only atomic path. Both product modules build.
+
+
+Damage and event batching (0.81.20)
+---------------------------------
+Hosted Paint drains at most 32 ordered GUI messages before publishing one
+frame. Changed image pixels form one bounded source rectangle; status damage
+is separate. Repeated unchanged samples upload no image. A changed point in
+the default 64x48 image sends 4 raster bytes instead of 12288 (UI commands
+are additional). Bresenham segments and pencil/eraser order are preserved.
+The existing transactional buffered Canvas handles command batching and
+cancels on append/commit failure. Retry, missing damage ABI, resize/font,
+menus/dialogs/tools, unsafe work-area boundaries and delta-chain compaction
+produce complete frames. No new SDK/ABI or generic FPS gate was added.
+Mouse-down dispatch enters the menu only for an open menu or its bar; a
+closed menu no longer consumes toolbar and drawing-area clicks as backdrop.
+A focused host case uses the actual App and real SDK with captured commands:
+full/delta raster-and-rectangle replay, ordered crossing strokes, eraser,
+no-op, input dispatch, append OOM, chain reset and unavailable damage ABI.
+Three existing buffered-Canvas conformance cases also pass. Text rendering
+is covered by the existing facade checks, not the temporary pixel replayer.
+No QEMU or physical hardware was needed for this application-only change.
