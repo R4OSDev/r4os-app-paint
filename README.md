@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.9`
+- Version: `0.1.10`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/PAINT.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
