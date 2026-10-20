@@ -105,3 +105,7 @@ row identity, failure-state preservation and cleanup; Notepad checks actual
 search values too. It does not claim a manual visual GUI acceptance.
 Appending the default .BMP suffix also requires its complete byte capacity;
 a partial extension is never used as a target.
+
+0.85.44: Rebuilt with SDK0.64.57 and the shared R4STD Unicode17.0.0
+extended grapheme editing boundaries. Byte offsets, scalar font advances
+and grapheme clusters are distinct; no shaping or BiDi support is implied.

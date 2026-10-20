@@ -1572,6 +1572,7 @@ fn clampI32(value: i32, min_value: i32, max_value: i32) i32 {
 }
 
 fn checkDialogText(app: *App) !void {
+    if (!r4os.gui.checkGraphemeEditing()) return error.GraphemeEditing;
     app.dialog = .save_as;
     app.setSaveName("ä");
     app.handleFileDialogKey(r4os.gui.Key.backspace);
