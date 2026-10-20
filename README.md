@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.10`
+- Version: `0.1.11`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/PAINT.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -87,3 +87,21 @@ no-op, input dispatch, append OOM, chain reset and unavailable damage ABI.
 Three existing buffered-Canvas conformance cases also pass. Text rendering
 is covered by the existing facade checks, not the temporary pixel replayer.
 No QEMU or physical hardware was needed for this application-only change.
+
+Unicode dialog contract (0.85.43)
+--------------------------------
+Save-as fields accept complete Unicode scalar events and keep separate byte
+cursor/selection positions. Invalid or overlong preloads and failed insertions
+preserve the previous input; a rejected filename cannot be saved until edited
+or replaced by a valid selection. Initial path arguments and constructed paths
+are checked in full, before copying or filesystem access. Directory labels may
+show a whole-scalar prefix plus ...; the stored full path alone identifies a row.
+Glyph coverage is independent of text input. No normalization, grapheme, Bidi
+or shaping promise follows from these scalar operations.
+Build.sh test (Build.bat test on Windows) exercises the actual app dialog owner.
+Tests/DialogText is an explicit IMAGE_SCOPE=none console fixture of the same app
+source. /DIALOGTEST additionally verifies real private file saves, full Unicode
+row identity, failure-state preservation and cleanup; Notepad checks actual
+search values too. It does not claim a manual visual GUI acceptance.
+Appending the default .BMP suffix also requires its complete byte capacity;
+a partial extension is never used as a target.
