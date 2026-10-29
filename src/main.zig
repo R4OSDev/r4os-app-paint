@@ -204,6 +204,15 @@ const App = struct {
                 self.renderHosted();
             },
             .key_down => self.handleHostedKey(r4os.gui.eventCodepoint(event)),
+            .input_reset, .focus_lost => {
+                const repaint = self.drawing or self.dialog_pressed_action != .none or self.menubar_state.isOpen();
+                self.drawing = false;
+                self.last_x = -1;
+                self.last_y = -1;
+                self.dialog_pressed_action = .none;
+                self.menubar_state.close();
+                if (repaint) self.renderHosted();
+            },
             .mouse_down => self.handleMouseDown(event.x, event.y),
             .mouse_up => self.handleMouseUp(event.x, event.y),
             .mouse_move => self.handleMouseMove(event.x, event.y, event.buttons),
