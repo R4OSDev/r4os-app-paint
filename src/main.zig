@@ -6,18 +6,14 @@ const AppApi = struct {
     sys: r4os.r4sys.Context,
     desk: r4os.r4desk.Context,
     draw: r4os.r4draw.Context,
-    net: r4os.r4net.Context,
-    dev: r4os.r4dev.Context,
     img: r4img.Context,
 
-    fn init(r4_app: *r4os.App) ?AppApi {
+    fn init(r4_app: *r4os.App2) ?AppApi {
         return .{
             .sys = r4_app.system(),
             .desk = r4_app.desktop() orelse return null,
             .draw = r4_app.drawing() orelse return null,
-            .net = r4_app.networkLowLevel() orelse return null,
-            .dev = r4_app.devicesLowLevel() orelse return null,
-            .img = r4img.Context.init(r4_app.startContext()) orelse return null,
+            .img = r4img.Context.init2(r4_app.startContext()) orelse return null,
         };
     }
 };
@@ -43,6 +39,8 @@ const toolbar_h: i32 = 34;
 const ctrl_n: u8 = 0x0E;
 const ctrl_o: u8 = 0x0F;
 const ctrl_s: u8 = 0x13;
+const ctrl_c: u8 = 0x03;
+const ctrl_v: u8 = 0x16;
 
 const SizeField = r4os.gui.TextField(5);
 
@@ -58,6 +56,8 @@ const Command = enum(u32) {
     file_save_as = 104,
     file_exit = 105,
     edit_change_size = 201,
+    edit_copy = 202,
+    edit_paste = 203,
 };
 
 const DialogMode = enum {
@@ -90,12 +90,13 @@ const ImagePoint = struct {
 
 const AppMenus = struct {
     file_items: [5]r4os.gui.MenuItem = undefined,
-    edit_items: [1]r4os.gui.MenuItem = undefined,
+    edit_items: [3]r4os.gui.MenuItem = undefined,
     menus: [2]r4os.gui.MenubarMenu = undefined,
 };
 
 const App = struct {
     saver: r4os.document_save.Saver = .{},
+    clipboard: r4os.gui.TextClipboard = .{},
     ctx: *AppApi = undefined,
     menubar_state: r4os.gui.MenubarState = .{},
     menu_storage: AppMenus = .{},
@@ -272,6 +273,8 @@ const App = struct {
             ctrl_n => self.requestAction(.new_file),
             ctrl_o => self.requestAction(.open_dialog),
             ctrl_s => self.saveCurrentOrOpenSaveAs(),
+            ctrl_c => self.copyImage(),
+            ctrl_v => self.pasteImage(),
             else => return false,
         }
         return true;
@@ -364,6 +367,8 @@ const App = struct {
             @intFromEnum(Command.file_save_as) => self.openFileDialog(.save_as),
             @intFromEnum(Command.file_exit) => self.requestAction(.exit_app),
             @intFromEnum(Command.edit_change_size) => self.openSizeDialog(),
+            @intFromEnum(Command.edit_copy) => self.copyImage(),
+            @intFromEnum(Command.edit_paste) => self.pasteImage(),
             else => {},
         }
     }
@@ -378,6 +383,64 @@ const App = struct {
             return;
         }
         self.performAction(action);
+    }
+
+    fn copyImage(self: *App) void {
+        if (self.clipboard.connect(&self.ctx.sys) != 0) {
+            self.setStatus("Image clipboard unavailable");
+            return;
+        }
+        const length = self.encodeClipboardImage();
+        const result = self.clipboard.copyFormat(r4os.abi.clipboard_offer_format_xrgb32, self.file_buffer[0..length]);
+        self.setStatus(if (result == 0) "Copied image" else "Copy failed; image retained");
+    }
+
+    fn encodeClipboardImage(self: *App) usize {
+        const count = imagePixelCount(self.image_w, self.image_h);
+        std.mem.writeInt(u32, self.file_buffer[0..4], self.image_w, .little);
+        std.mem.writeInt(u32, self.file_buffer[4..8], self.image_h, .little);
+        std.mem.writeInt(u32, self.file_buffer[8..12], self.image_w * 4, .little);
+        std.mem.writeInt(u32, self.file_buffer[12..16], 0, .little);
+        for (self.pixels[0..count], 0..) |pixel, index| {
+            std.mem.writeInt(u32, self.file_buffer[16 + index * 4 ..][0..4], pixel & 0x00ffffff, .little);
+        }
+        return 16 + count * 4;
+    }
+
+    fn pasteImage(self: *App) void {
+        if (self.clipboard.connect(&self.ctx.sys) != 0) {
+            self.setStatus("Image clipboard unavailable");
+            return;
+        }
+        const count = self.clipboard.readFormat(r4os.abi.clipboard_offer_format_xrgb32, &self.file_buffer);
+        if (count < 0 or !self.pasteImageBytes(self.file_buffer[0..@intCast(count)])) {
+            self.setStatus("Paste failed; image retained");
+            return;
+        }
+        self.setStatus("Pasted image");
+    }
+
+    fn pasteImageBytes(self: *App, bytes: []const u8) bool {
+        if (bytes.len < 16) return false;
+        const width = std.mem.readInt(u32, bytes[0..4], .little);
+        const height = std.mem.readInt(u32, bytes[4..8], .little);
+        const stride = std.mem.readInt(u32, bytes[8..12], .little);
+        const flags = std.mem.readInt(u32, bytes[12..16], .little);
+        const count = r4os.raster.requiredPixels(width, height) catch return false;
+        if (stride != width * 4 or flags != 0 or bytes.len != 16 + count * 4) return false;
+        for (self.raster_patch[0..count], 0..) |*pixel, index| {
+            pixel.* = std.mem.readInt(u32, bytes[16 + index * 4 ..][0..4], .little) & 0x00ffffff;
+        }
+        @memcpy(self.pixels[0..count], self.raster_patch[0..count]);
+        self.image_w = width;
+        self.image_h = height;
+        self.dirty = true;
+        self.drawing = false;
+        self.last_x = -1;
+        self.last_y = -1;
+        self.image_damage = null;
+        self.full_redraw = true;
+        return true;
     }
 
     fn performAction(self: *App, action: PendingAction) void {
@@ -756,6 +819,7 @@ const App = struct {
     fn resolveDirEntry(self: *App, index: usize) i32 {
         if (index >= self.directory_page.count) return -1;
         const row = &self.directory_page.rows[index];
+        if (self.directory_page.verify(.{ .sys = self.ctx.sys }, index) != 0) return -1;
         setZ(self.selected_path[0..], spanZ(row.path[0..]));
         return switch (row.kind) {
             .file => 0,
@@ -827,19 +891,21 @@ const App = struct {
         }
         var path_copy: [path_capacity]u8 = .{0} ** path_capacity;
         copyZ(path_copy[0..], path_buffer);
-        if (self.ctx.sys.fileInfo(zptr(path_copy[0..]))) |info| {
-            if (info.size > self.file_buffer.len) {
-                self.showMessage("Open failed", "BMP file is too large for Paint.", .warning);
+        var candidate: [bmp_buffer_capacity + 1]u8 = undefined;
+        const files = r4os.app_storage.Files{ .sys = self.ctx.sys };
+        const read = switch (files.readDocumentPrefix(.{ .ptr = zptr(&path_copy), .len = @intCast(spanZ(&path_copy).len) }, &candidate, r4os.time_contract.timeoutFinite(.{ .nanoseconds = 5_000_000_000 }))) {
+            .value => |value| value,
+            .failure => {
+                self.showMessage("Open failed", "Could not read a stable BMP file.", .warning);
                 return false;
-            }
-        }
-        const read = self.ctx.sys.fileRead(zptr(path_copy[0..]), self.file_buffer[0..]);
-        if (read < 0) {
-            self.showMessage("Open failed", "Could not read BMP file.", .warning);
+            },
+        };
+        if (read.truncated or read.bytes > bmp_buffer_capacity) {
+            self.showMessage("Open failed", "BMP file is too large for Paint.", .warning);
             return false;
         }
-        const len: usize = @intCast(read);
-        const info = self.ctx.img.probe(self.file_buffer[0..len], "image/bmp") catch |err| {
+        const len = read.bytes;
+        const info = self.ctx.img.probe(candidate[0..len], "image/bmp") catch |err| {
             self.showMessage("Open failed", imageErrorText(err), .warning);
             return false;
         };
@@ -861,10 +927,11 @@ const App = struct {
             return false;
         };
         defer allocator.free(scratch);
-        const image = self.ctx.img.decode(self.file_buffer[0..len], "image/bmp", self.pixels[0..], scratch) catch |err| {
+        const image = self.ctx.img.decode(candidate[0..len], "image/bmp", &self.raster_patch, scratch) catch |err| {
             self.showMessage("Open failed", imageErrorText(err), .warning);
             return false;
         };
+        @memcpy(self.pixels[0..image.pixels.len], image.pixels);
         self.image_w = image.info.width;
         self.image_h = image.info.height;
         copyZ(self.current_path[0..], path_copy[0..]);
@@ -1373,6 +1440,8 @@ fn buildAppMenus(out: *AppMenus) []const r4os.gui.MenubarMenu {
         .{ .text = "Exit", .id = @intFromEnum(Command.file_exit), .separator_before = true },
     };
     out.edit_items = .{
+        .{ .text = "Copy Image", .id = @intFromEnum(Command.edit_copy), .shortcut = "Ctrl+C" },
+        .{ .text = "Paste Image", .id = @intFromEnum(Command.edit_paste), .shortcut = "Ctrl+V" },
         .{ .text = "Change Size", .id = @intFromEnum(Command.edit_change_size) },
     };
     out.menus = .{
@@ -1384,12 +1453,14 @@ fn buildAppMenus(out: *AppMenus) []const r4os.gui.MenubarMenu {
 
 var app_state: App = .{};
 
-pub fn r4_app_main(r4_app: *r4os.App) i32 {
+pub fn r4_app_main(r4_app: *r4os.App2) i32 {
     var ctx = AppApi.init(r4_app) orelse return r4os.abi.err_no_group;
     if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, std.mem.span(ctx.sys.argsRaw()), " \t\r\n"), "/DIALOGTEST")) return runDialogTextSelfTest(&ctx);
     app_state = .{};
     app_state.init(&ctx);
-    return app_state.run();
+    const result = app_state.run();
+    const closed = app_state.clipboard.close();
+    return if (closed < 0) closed else result;
 }
 
 fn zptr(buffer: []const u8) [*:0]const u8 {
@@ -1678,6 +1749,31 @@ fn checkNativeDialog(app: *App) !void {
         app.ctx.sys.dirDelete(directory) <= 0) return error.PrivateCleanup;
 }
 
+fn checkNativeClipboard(app: *App) !void {
+    for (0..6) |pass| {
+        if (!app.resetImage(128, 128, true, true)) return error.ClipboardImageSize;
+        for (&app.pixels, 0..) |*pixel, index| pixel.* = @intCast((index * 0x010203 + pass) & 0x00ffffff);
+        app.copyImage();
+        if (!std.mem.eql(u8, spanZ(&app.hosted_status), "Copied image")) return error.ClipboardCommit;
+        @memset(&app.pixels, 0);
+        app.image_w = 2;
+        app.image_h = 2;
+        app.pasteImage();
+        if (app.image_w != 128 or app.image_h != 128 or !app.dirty) return error.ClipboardImageDimensions;
+        for (app.pixels, 0..) |pixel, index| {
+            if (pixel != ((index * 0x010203 + pass) & 0x00ffffff)) return error.ClipboardPixelBytes;
+        }
+    }
+    if (app.clipboard.copy("Explicit text offer") != 0) return error.ClipboardTextReplacement;
+    app.dirty = false;
+    const first = app.pixels[0];
+    const last = app.pixels[app.pixels.len - 1];
+    app.pasteImage();
+    if (app.image_w != 128 or app.image_h != 128 or app.dirty or
+        app.pixels[0] != first or app.pixels[app.pixels.len - 1] != last) return error.UnsupportedPasteMutation;
+    if (app.clipboard.close() != 0) return error.ClipboardClose;
+}
+
 fn runDialogTextSelfTest(ctx: *AppApi) i32 {
     app_state = .{ .ctx = ctx };
     const app = &app_state;
@@ -1692,8 +1788,41 @@ fn runDialogTextSelfTest(ctx: *AppApi) i32 {
         ctx.sys.println(@errorName(err));
         return 1;
     };
+    checkNativeClipboard(app) catch |err| {
+        ctx.sys.write("PAINT image clipboard selftest FAILED: ");
+        ctx.sys.println(@errorName(err));
+        return 1;
+    };
     ctx.sys.println("PAINT Unicode dialog selftest: OK codepoints=whole capacity=retained save=exact labels=separate cleanup=complete");
     return 0;
+}
+
+test "PAINT dialog owner image clipboard rejects malformed dimensions and retains exact pixels" {
+    const app = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app);
+    app.* = .{};
+    app.image_w = 2;
+    app.image_h = 1;
+    app.pixels[0] = 0x00112233;
+    app.pixels[1] = 0x00aabbcc;
+    const length = app.encodeClipboardImage();
+    try std.testing.expectEqual(@as(usize, 24), length);
+    var saved: [24]u8 = undefined;
+    @memcpy(&saved, app.file_buffer[0..length]);
+    @memset(&app.pixels, 0);
+    try std.testing.expect(app.pasteImageBytes(&saved));
+    try std.testing.expectEqualSlices(u32, &.{ 0x00112233, 0x00aabbcc }, app.pixels[0..2]);
+    app.dirty = false;
+    for ([_]usize{ 0, 4, 8, 12 }) |field| {
+        var malformed = saved;
+        std.mem.writeInt(u32, malformed[field..][0..4], 0xffffffff, .little);
+        try std.testing.expect(!app.pasteImageBytes(&malformed));
+        try std.testing.expectEqualSlices(u32, &.{ 0x00112233, 0x00aabbcc }, app.pixels[0..2]);
+        try std.testing.expect(!app.dirty);
+    }
+    try std.testing.expect(!app.pasteImageBytes(saved[0..23]));
+    try std.testing.expectEqual(@as(u32, 2), app.image_w);
+    try std.testing.expectEqual(@as(u32, 1), app.image_h);
 }
 
 test "PAINT dialog owner Unicode prefill scalar editing and rejected save capacity" {
